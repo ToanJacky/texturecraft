@@ -30,8 +30,10 @@ pub fn start() {
                 Ok(()) => el.remove(),
                 Err(e) => {
                     log::error!("TextureCraft failed to start: {e}");
+                    // A host page shows its own product, not this app's name
+                    let name = if embedded() { "The texture painter" } else { "TextureCraft" };
                     el.set_text_content(Some(&format!(
-                        "TextureCraft failed to start: {e}. It needs a browser with WebGPU (current Chrome, Edge or Safari) or at least WebGL2."
+                        "{name} failed to start: {e}. It needs a browser with WebGPU (current Chrome, Edge or Safari) or at least WebGL2."
                     )));
                 }
             }

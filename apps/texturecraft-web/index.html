@@ -33,15 +33,26 @@
        this page, no Rust runs to say so, so the page itself shows what to do after a while. */
     #texturecraft_stalled { color: #8c8c8c; visibility: hidden; animation: texturecraft-stalled 0s 30s forwards; }
     @keyframes texturecraft-stalled { to { visibility: visible; } }
+    /* Inside a host page (?embed) the loading screen carries the host's look, not this app's name. */
+    .host-name { display: none; }
+    .embed #texturecraft_loading h1, .embed .app-name { display: none; }
+    .embed .host-name { display: inline; }
+    .embed #texturecraft_progress { color: #00a76f; accent-color: #00a76f; }
+    .embed #texturecraft_progress::-webkit-progress-value { background: #00a76f; }
+    .embed #texturecraft_progress::-moz-progress-bar { background: #00a76f; }
+    .embed #texturecraft_progress:indeterminate { background: linear-gradient(90deg, #333 0%, #00a76f 50%, #333 100%) 0 0 / 300% 100%; }
   </style>
 </head>
 <body>
+  <script>
+    if (/[?&]embed(=|&|$)/.test(location.search)) document.documentElement.classList.add("embed");
+  </script>
   <canvas id="texturecraft_canvas"></canvas>
   <div id="texturecraft_loading" role="status" aria-live="polite">
     <h1>TextureCraft</h1>
     <progress id="texturecraft_progress" max="1" aria-label="Loading TextureCraft"></progress>
     <p id="texturecraft_status">Downloading&hellip;</p>
-    <p id="texturecraft_stalled">This is taking longer than usual. If TextureCraft doesn't start, its files may have failed to
+    <p id="texturecraft_stalled">This is taking longer than usual. If <span class="app-name">TextureCraft</span><span class="host-name">the painter</span> doesn't start, its files may have failed to
       download or come from a different version of this page. <a href="">Reload</a> to try again; the browser
       console lists what failed.</p>
   </div>
