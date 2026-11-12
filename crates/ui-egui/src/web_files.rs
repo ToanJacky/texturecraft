@@ -156,6 +156,8 @@ pub fn load(app: &mut TextureCraftApp, name: &str, bytes: Vec<u8>) {
         Ok(next) => {
             app.session.switch_to(next);
             app.toast(trf("Opened {name}", &[("name", &name)]), false);
+            #[cfg(target_arch = "wasm32")]
+            web::host_apply_textures(app);
         }
         Err(e) => app.toast(trf("Couldn't open {name}: {error}", &[("name", &name), ("error", &e)]), true),
     }
@@ -342,7 +344,10 @@ mod web {
 
     // The host bridge: a page that embeds the app in an `<iframe>` (same origin) loads a mesh into it and asks for the
     // painted mesh back, through `window.postMessage`. Messages are objects with a `type`:
-    //   host -> app   `texturecraft:load`       { name, bytes: ArrayBuffer, resolution?: 256..=4096 }
+    //   host -> app   `texturecraft:load`       { name, bytes: ArrayBuffer, resolution?: 256..=4096,
+    //                                             textures?: { baseColor?, normal?, roughness?, metallic?: ArrayBuffer } }
+    //                 (`textures`: the mesh's own maps as image files, one per channel; they become the bottom fill
+    //                 layer "Original texture", projected by UV, because opening a mesh does not read its textures)
     //   host -> app   `texturecraft:exportMesh` {}
     //   app  -> host  `texturecraft:ready`      {}                       (once, when the app runs)
     //   app  -> host  `texturecraft:dirty`      { dirty: bool }          (when unsaved changes appear or go)
@@ -358,6 +363,38 @@ mod web {
     static HOST_DIRTY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
 
     const HOST_SIZES: [u32; 5] = [256, 512, 1024, 2048, 4096];
+    /// Channels a host may send a map for, by their command ids.
+    const HOST_CHANNELS: [&str; 4] = ["baseColor", "normal", "roughness", "metallic"];
+    /// The maps that came with the host's last `load`, for the mesh it carries: (channel, image file bytes).
+    static HOST_TEXTURES: Mutex<Vec<(&'static str, Vec<u8>)>> = Mutex::new(Vec::new());
+
+    /// After the host's mesh opened: its own maps as a UV-projected fill layer under the paint layer. The project then
+    /// counts as unmodified (this is the state the host gave us).
+    pub(super) fn host_apply_textures(app: &mut TextureCraftApp) {
+        let maps = std::mem::take(&mut *HOST_TEXTURES.lock().unwrap_or_else(PoisonError::into_inner));
+        if maps.is_empty() {
+            return;
+        }
+        let ts = app.session.ts();
+        let paint = app.session.selected.get(&ts).copied();
+        let Some(fill) = app.run("layer.add.fill", serde_json::json!({ "name": "Original texture" })).and_then(|v| v.get("layer").and_then(Value::as_u64)) else {
+            return;
+        };
+        app.run("layer.fill.projection", serde_json::json!({ "layer": fill, "projection": "uv" }));
+        for (channel, bytes) in maps {
+            match app.session.import_resource_bytes(&format!("original_{channel}.png"), bytes) {
+                Ok(image) => {
+                    app.run("layer.fill.set", serde_json::json!({ "layer": fill, "channel": channel, "image": image }));
+                }
+                Err(e) => host_post("texturecraft:error", &[("message", format!("{channel} map: {e}").into())]),
+            }
+        }
+        app.run("layer.move", serde_json::json!({ "layer": fill, "index": 0 }));
+        if let Some(paint) = paint {
+            app.run("layer.select", serde_json::json!({ "layer": paint.0 }));
+        }
+        app.session.modified = false;
+    }
 
     fn host_origin() -> Option<String> {
         web_sys::window()?.location().origin().ok()
@@ -406,6 +443,15 @@ mod web {
                     let name = name.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
                     let size = field("resolution").as_f64().map(|v| v as u32).filter(|v| HOST_SIZES.contains(v)).unwrap_or(0);
                     HOST_RESOLUTION.store(size, Relaxed);
+                    let textures = field("textures");
+                    let maps = HOST_CHANNELS
+                        .iter()
+                        .filter_map(|channel| {
+                            let buffer = js_sys::Reflect::get(&textures, &(*channel).into()).ok()?.dyn_into::<js_sys::ArrayBuffer>().ok()?;
+                            Some((*channel, js_sys::Uint8Array::new(&buffer).to_vec()))
+                        })
+                        .collect();
+                    *HOST_TEXTURES.lock().unwrap_or_else(PoisonError::into_inner) = maps;
                     INBOX.lock().unwrap_or_else(PoisonError::into_inner).push((name, js_sys::Uint8Array::new(&buffer).to_vec(), Pick::Open));
                 }
                 Some("texturecraft:exportMesh") => HOST_EXPORT.store(true, Relaxed),
