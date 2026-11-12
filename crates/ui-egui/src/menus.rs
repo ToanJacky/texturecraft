@@ -144,7 +144,7 @@ pub fn invoke(app: &mut TextureCraftApp, ctx: &egui::Context, id: &str) {
     }
 
     if let Some(panel) = crate::docking::view_panel(id) {
-        if crate::rail_popup::is_rail_panel(panel) {
+        if crate::rail_popup::is_rail_panel(app, panel) {
             crate::rail_popup::toggle(app, panel);
         } else {
             app.ui.dock.toggle(panel);

@@ -344,42 +344,75 @@ pub fn path_controls(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
     }
 }
 
+/// The paint bar's height inside the viewport, which the floating tool shelf starts below
+const PAINT_BAR_HEIGHT: f32 = 40.0;
+
+/// Gap between the floating tool shelf and the viewport's edges
+const FLOATING_SHELF_INSET: f32 = 8.0;
+
 pub fn tool_shelf(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
+    // An embedding host gets the tools over the viewport instead (`floating_tool_shelf`)
+    if app.ui.embedded {
+        return;
+    }
+
     let tokens = Tokens::get(ui.ctx());
     egui::Panel::left("tool_shelf").resizable(false).exact_size(40.0).show_separator_line(false).frame(egui::Frame::NONE).show(ui, |ui| {
-        card(ui, &tokens, egui::Margin { left: GUTTER, right: 0, top: GUTTER, bottom: GUTTER }, egui::Margin::symmetric(3, 6), |ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.add_enabled_ui(app.ui.mode == Mode::Painting, |ui| {
-                for tool in Tool::ALL {
-                    let selected = app.ui.mode == Mode::Painting && app.session.tool.tool == tool;
-                    let hint = tip(&app.ui.keymap, tr(tool.label()), &format!("tool.{}", tool.id()));
-                    if icon_button(ui, tool_icon(tool), &hint, selected, 28.0).clicked() {
-                        app.run("tool.select", json!({"tool": tool.id()}));
-                    }
-                }
+        card(ui, &tokens, egui::Margin { left: GUTTER, right: 0, top: GUTTER, bottom: GUTTER }, egui::Margin::symmetric(3, 6), |ui| tool_buttons(app, ui));
+    });
+}
 
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
-                let quick_mask = &app.session.quick_mask;
-                for (command, icon, label, selected) in [
-                    ("viewport.quickMask", ic::SELECTION_BACKGROUND, tr("Quick mask"), quick_mask.enabled),
-                    ("viewport.quickMask.edit", ic::SELECTION, tr("Edit quick mask"), quick_mask.editing),
-                    ("viewport.quickMask.invert", ic::SELECTION_INVERSE, tr("Invert quick mask"), quick_mask.inverted),
-                ] {
-                    if icon_button(ui, icon, &tip(&app.ui.keymap, label, command), selected, 28.0).clicked() {
-                        app.run(command, json!({}));
-                    }
-                }
+/// Embed mode: the tools float over the viewport's top left corner, so the viewport keeps the column they would take.
+/// Drawn after the dock, which records where the viewport is.
+pub fn floating_tool_shelf(app: &mut TextureCraftApp, ctx: &egui::Context) {
+    let Some(viewport) = crate::rail_popup::viewport_rect(ctx) else { return };
 
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
-                if icon_button(ui, ic::SPHERE, tr("Add smart material from the shelf"), false, 28.0).clicked() {
-                    app.ui.dock.focus(Panel::Assets);
-                }
+    let tokens = Tokens::get(ctx);
+    let at = viewport.left_top() + vec2(FLOATING_SHELF_INSET, PAINT_BAR_HEIGHT + FLOATING_SHELF_INSET);
+    egui::Area::new(egui::Id::unique("floating_tool_shelf")).order(egui::Order::Middle).fixed_pos(at).constrain_to(viewport).show(ctx, |ui| {
+        egui::Frame::NONE
+            .fill(tokens.panel)
+            .stroke(egui::Stroke::new(1.0, tokens.chrome))
+            .corner_radius(crate::theme::CARD_RADIUS)
+            .inner_margin(egui::Margin::symmetric(3, 6))
+            .show(ui, |ui| {
+                ui.set_width(28.0);
+                tool_buttons(app, ui);
             });
-        });
+    });
+}
+
+fn tool_buttons(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing.y = 3.0;
+    ui.add_enabled_ui(app.ui.mode == Mode::Painting, |ui| {
+        for tool in Tool::ALL {
+            let selected = app.ui.mode == Mode::Painting && app.session.tool.tool == tool;
+            let hint = tip(&app.ui.keymap, tr(tool.label()), &format!("tool.{}", tool.id()));
+            if icon_button(ui, tool_icon(tool), &hint, selected, 28.0).clicked() {
+                app.run("tool.select", json!({"tool": tool.id()}));
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        let quick_mask = &app.session.quick_mask;
+        for (command, icon, label, selected) in [
+            ("viewport.quickMask", ic::SELECTION_BACKGROUND, tr("Quick mask"), quick_mask.enabled),
+            ("viewport.quickMask.edit", ic::SELECTION, tr("Edit quick mask"), quick_mask.editing),
+            ("viewport.quickMask.invert", ic::SELECTION_INVERSE, tr("Invert quick mask"), quick_mask.inverted),
+        ] {
+            if icon_button(ui, icon, &tip(&app.ui.keymap, label, command), selected, 28.0).clicked() {
+                app.run(command, json!({}));
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        if icon_button(ui, ic::SPHERE, tr("Add smart material from the shelf"), false, 28.0).clicked() {
+            app.ui.dock.focus(Panel::Assets);
+        }
     });
 }
 
@@ -402,12 +435,15 @@ pub fn rail(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
         card(ui, &tokens, egui::Margin { left: 0, right: GUTTER, top: GUTTER, bottom: GUTTER }, RAIL_CARD_PADDING, |ui| {
             ui.spacing_mut().item_spacing.y = RAIL_ICON_GAP;
             crate::rail_popup::begin_rail(ui.ctx(), ui.max_rect());
-            if icon_button(ui, ic::EXPORT, &tip(&app.ui.keymap, tr("Export textures"), "ui.export"), app.ui.windows.export, RAIL_ICON_SIZE).clicked() {
+            // An embedding host saves the project itself, so its rail has no export
+            if !app.ui.embedded
+                && icon_button(ui, ic::EXPORT, &tip(&app.ui.keymap, tr("Export textures"), "ui.export"), app.ui.windows.export, RAIL_ICON_SIZE).clicked()
+            {
                 app.ui.windows.export = !app.ui.windows.export;
             }
 
             // A panel in the dock, docked or floating, leaves the rail until it is closed there
-            for (panel, icon, id) in crate::rail_popup::RAIL_PANELS {
+            for (panel, icon, id) in crate::rail_popup::rail_panels(app.ui.embedded) {
                 if app.ui.dock.is_open(panel) {
                     continue;
                 }

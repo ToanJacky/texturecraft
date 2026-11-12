@@ -11,13 +11,26 @@ use crate::theme::Tokens;
 use crate::widgets::icon_button;
 
 /// The rail's panels, top to bottom, with their icons and Window ▸ Views ids
-pub(crate) const RAIL_PANELS: [(Panel, &str, &str); 5] = [
+const RAIL_PANELS: [(Panel, &str, &str); 5] = [
     (Panel::TextureSetSettings, ic::STACK, "ui.view.textureSetSettings"),
     (Panel::Display, ic::MONITOR, "ui.view.display"),
     (Panel::Shader, ic::SLIDERS_HORIZONTAL, "ui.view.shader"),
     (Panel::History, ic::CLOCK_COUNTER_CLOCKWISE, "ui.view.history"),
     (Panel::Log, ic::FILE_TEXT, "ui.view.log"),
 ];
+
+/// The panels an embedding host keeps out of the dock, above the rail's own: they open from the rail too
+const EMBED_RAIL_PANELS: [(Panel, &str, &str); 3] = [
+    (Panel::Layers, ic::STACK_SIMPLE, "ui.view.layers"),
+    (Panel::Properties, ic::FADERS, "ui.view.properties"),
+    (Panel::TextureSetList, ic::SQUARES_FOUR, "ui.view.textureSetList"),
+];
+
+/// The rail's panels, top to bottom: `RAIL_PANELS`, after the host's when the app is embedded
+pub(crate) fn rail_panels(embedded: bool) -> impl Iterator<Item = (Panel, &'static str, &'static str)> {
+    let host: &[(Panel, &str, &str)] = if embedded { &EMBED_RAIL_PANELS } else { &[] };
+    host.iter().chain(RAIL_PANELS.iter()).copied()
+}
 
 /// The popup reaches this far into the viewport, so it covers the panels between the viewport and the rail
 const VIEWPORT_OVERHANG: f32 = 48.0;
@@ -63,8 +76,8 @@ fn viewport_id() -> Id {
 }
 
 /// Whether `panel` opens from the rail rather than in the dock
-pub(crate) fn is_rail_panel(panel: Panel) -> bool {
-    RAIL_PANELS.iter().any(|(rail_panel, _, _)| *rail_panel == panel)
+pub(crate) fn is_rail_panel(app: &TextureCraftApp, panel: Panel) -> bool {
+    rail_panels(app.ui.embedded).any(|(rail_panel, _, _)| rail_panel == panel)
 }
 
 /// Whether the rail's open popup is visible in the current UI mode
@@ -83,6 +96,11 @@ pub(crate) fn begin_rail(ctx: &egui::Context, strip: Rect) {
 /// Record where the rail drew `panel`'s icon
 pub(crate) fn remember_icon(ctx: &egui::Context, panel: Panel, icon: Rect) {
     ctx.data_mut(|data| data.get_temp_mut_or_default::<Vec<(Panel, Rect)>>(icons_id()).push((panel, icon)));
+}
+
+/// Where the dock drew the viewport on this frame, once it has
+pub(crate) fn viewport_rect(ctx: &egui::Context) -> Option<Rect> {
+    ctx.data(|data| data.get_temp::<Rect>(viewport_id()))
 }
 
 /// Record where the dock drew the viewport, whose right edge the popup reaches past
@@ -214,7 +232,7 @@ fn closed_by_input(ctx: &egui::Context, shown: Option<Rect>, strip: Rect) -> boo
 fn body(app: &mut TextureCraftApp, ui: &mut Ui, panel: Panel, available_height: f32) {
     // A child Ui, so the height limits start below the title row instead of moving the cursor back up to it
     ui.scope(|ui| {
-        if matches!(panel, Panel::History | Panel::Log) {
+        if matches!(panel, Panel::History | Panel::Log | Panel::Layers) {
             ui.set_height(LIST_HEIGHT.min(available_height));
         } else {
             // The area's remembered size would otherwise cap the height

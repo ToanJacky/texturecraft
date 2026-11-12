@@ -714,7 +714,10 @@ impl eframe::App for TextureCraftApp {
         let ctx = ui.ctx().clone();
         let t0 = now_ms();
         if !self.ui.hide_ui {
-            titlebar::show(self, ui);
+            // An embedding host has its own bar; the commands keep their shortcuts
+            if !self.ui.embedded {
+                titlebar::show(self, ui);
+            }
             banner(self, ui);
             toolbar::status_bar(self, ui);
             toolbar::tool_shelf(self, ui);
@@ -728,6 +731,9 @@ impl eframe::App for TextureCraftApp {
         // The dock keeps the cards' gutter from the bars and rails around it
         let panel_frame = if hide { egui::Frame::NONE.fill(tk.viewport) } else { egui::Frame::NONE.fill(tk.chrome).inner_margin(theme::GUTTER) };
         egui::CentralPanel::default().frame(panel_frame).show(ui, |ui| if hide { viewport::central(self, ui) } else { docking::show(self, ui) });
+        if self.ui.embedded && !hide {
+            toolbar::floating_tool_shelf(self, &ctx);
+        }
         windows::show(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         updates_ui::show(self, &ctx);

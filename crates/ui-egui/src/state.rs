@@ -291,6 +291,14 @@ pub struct UiState {
     pub(crate) selected_baked_map: Option<BakedMap>,
     /// Window ▸ Hide UI (Tab): only the viewport.
     pub hide_ui: bool,
+    /// The app runs inside a host page that owns the project (`?embed`): no menu strip, the tools float over the
+    /// viewport, and the layers, properties and texture set panels open from the rail.
+    #[serde(skip)]
+    pub embedded: bool,
+    /// The embed layout this browser's saved panels were last reset for; 0 before any, so a host's first start closes
+    /// the side panels and later starts keep what the user docked.
+    #[serde(default)]
+    pub embed_layout_version: u32,
     pub windows: Windows,
     pub uv_zoom: f32,
     pub uv_pan: [f32; 2],
@@ -384,6 +392,8 @@ impl Default for UiState {
             bake_layout_version: BAKE_LAYOUT_VERSION,
             selected_baked_map: None,
             hide_ui: false,
+            embedded: false,
+            embed_layout_version: 0,
             windows: Windows::default(),
             uv_zoom: 1.0,
             uv_pan: [0.0, 0.0],

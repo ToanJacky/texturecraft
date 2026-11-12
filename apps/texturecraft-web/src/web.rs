@@ -159,8 +159,12 @@ fn embedded() -> bool {
 }
 
 /// The host's look and a wide workspace, applied at every start over whatever this browser saved: the dark level with the
-/// green accent (the embedding studio is dark), no start window, one 3D view, and the asset shelf and the texture set panels closed (Window > Views
-/// reopens them; the layers and properties column stays).
+/// green accent (the embedding studio is dark), no start window or menu strip, one 3D view, the tools floating over it, and
+/// the side panels closed: layers, properties and the texture sets open from the rail, where dragging a popup's title
+/// docks it again (layers and properties are closed only on a browser's first start, so a docked one stays).
+/// Raise to close the layers and properties panels once more in every browser.
+const EMBED_LAYOUT_VERSION: u32 = 1;
+
 fn apply_embed_defaults(app: &mut TextureCraftApp) {
     use texturecraft_ui_egui::docking::Panel;
     use texturecraft_ui_egui::state::ViewLayout;
@@ -168,11 +172,22 @@ fn apply_embed_defaults(app: &mut TextureCraftApp) {
 
     app.ui.prefs.brightness = Brightness::Dark;
     app.ui.prefs.accent = Accent::Green;
+    app.ui.embedded = true;
     app.ui.windows.start = false;
     app.ui.layout = ViewLayout::Only3D;
     for panel in [Panel::Assets, Panel::TextureSetList, Panel::TextureSetSettings] {
         if app.ui.dock.is_open(panel) {
             app.ui.dock.close(panel);
+        }
+    }
+
+    // Once per browser: afterwards a panel the user docked from the rail stays docked
+    if app.ui.embed_layout_version < EMBED_LAYOUT_VERSION {
+        app.ui.embed_layout_version = EMBED_LAYOUT_VERSION;
+        for panel in [Panel::Layers, Panel::Properties] {
+            if app.ui.dock.is_open(panel) {
+                app.ui.dock.close(panel);
+            }
         }
     }
 }
