@@ -57,6 +57,9 @@ async fn run(canvas: web_sys::HtmlCanvasElement) -> Result<(), String> {
             Box::new(|cc| {
                 let mut app = TextureCraftApp::new(cc, session);
                 app.ui.windows.start = app.ui.prefs.start_window;
+                if embedded() {
+                    apply_embed_defaults(&mut app);
+                }
                 if let Some(rs) = &cc.wgpu_render_state {
                     let backend = rs.adapter.get_info().backend;
                     log::info!("TextureCraft: wgpu backend {backend:?}");
@@ -147,6 +150,30 @@ fn initial_session() -> Result<Session, String> {
             Session::new_project("Untitled", texturecraft_engine::geom::primitives::material_ball(), "builtin:material_ball", None, 1024)
         })
         .map_err(|e| e.to_string())
+}
+
+/// `?embed` in the page URL: the app runs inside a host page (an `<iframe>`) that owns the project.
+fn embedded() -> bool {
+    query().trim_start_matches('?').split('&').any(|pair| pair == "embed" || pair.starts_with("embed="))
+}
+
+/// The host's look and a wide workspace, applied at every start over whatever this browser saved: the light level with the
+/// green accent, no start window, one 3D view, and the asset shelf and the texture set panels closed (Window > Views
+/// reopens them; the layers and properties column stays).
+fn apply_embed_defaults(app: &mut TextureCraftApp) {
+    use texturecraft_ui_egui::docking::Panel;
+    use texturecraft_ui_egui::state::ViewLayout;
+    use texturecraft_ui_egui::theme::{Accent, Brightness};
+
+    app.ui.prefs.brightness = Brightness::Light;
+    app.ui.prefs.accent = Accent::Green;
+    app.ui.windows.start = false;
+    app.ui.layout = ViewLayout::Only3D;
+    for panel in [Panel::Assets, Panel::TextureSetList, Panel::TextureSetSettings] {
+        if app.ui.dock.is_open(panel) {
+            app.ui.dock.close(panel);
+        }
+    }
 }
 
 fn query() -> String {
