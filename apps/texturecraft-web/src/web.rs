@@ -158,15 +158,15 @@ fn embedded() -> bool {
     query().trim_start_matches('?').split('&').any(|pair| pair == "embed" || pair.starts_with("embed="))
 }
 
-/// The host's look and a wide workspace, applied at every start over whatever this browser saved: the light level with the
-/// green accent, no start window, one 3D view, and the asset shelf and the texture set panels closed (Window > Views
+/// The host's look and a wide workspace, applied at every start over whatever this browser saved: the dark level with the
+/// green accent (the embedding studio is dark), no start window, one 3D view, and the asset shelf and the texture set panels closed (Window > Views
 /// reopens them; the layers and properties column stays).
 fn apply_embed_defaults(app: &mut TextureCraftApp) {
     use texturecraft_ui_egui::docking::Panel;
     use texturecraft_ui_egui::state::ViewLayout;
     use texturecraft_ui_egui::theme::{Accent, Brightness};
 
-    app.ui.prefs.brightness = Brightness::Light;
+    app.ui.prefs.brightness = Brightness::Dark;
     app.ui.prefs.accent = Accent::Green;
     app.ui.windows.start = false;
     app.ui.layout = ViewLayout::Only3D;
