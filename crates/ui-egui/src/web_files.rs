@@ -348,8 +348,16 @@ mod web {
     //                                             textures?: { baseColor?, normal?, roughness?, metallic?: ArrayBuffer } }
     //                 (`textures`: the mesh's own maps as image files, one per channel; they become the bottom fill
     //                 layer "Original texture", projected by UV, because opening a mesh does not read its textures)
+    //                 `overlay?: { name?: string, textures: { ...same channels } }`: a second set of maps for the same
+    //                 mesh and UVs (say an AI repaint of it). It becomes a fill layer with a white mask between
+    //                 "Original texture" and the paint layer, so the host's brush modes can wipe it away and bring it back.
+    //   host -> app   `texturecraft:brush`      { mode: "paint" | "hideOverlay" | "showOverlay" }
+    //                 (paint: strokes go to the paint layer; hideOverlay / showOverlay: strokes paint the overlay's
+    //                 mask black / white. Ignored for the two overlay modes when the load carried no overlay)
+    //   host -> app   `texturecraft:overlay`    { opacity: 0..1 }        (how strongly the overlay covers the original)
     //   host -> app   `texturecraft:exportMesh` {}
     //   app  -> host  `texturecraft:ready`      {}                       (once, when the app runs)
+    //   app  -> host  `texturecraft:loaded`     { overlay: bool }        (the host's mesh opened; whether it has an overlay layer)
     //   app  -> host  `texturecraft:dirty`      { dirty: bool }          (when unsaved changes appear or go)
     //   app  -> host  `texturecraft:mesh`       { name, bytes: ArrayBuffer }  (the textured GLB; clears dirty)
     //   app  -> host  `texturecraft:error`      { message }
@@ -367,33 +375,90 @@ mod web {
     const HOST_CHANNELS: [&str; 4] = ["baseColor", "normal", "roughness", "metallic"];
     /// The maps that came with the host's last `load`, for the mesh it carries: (channel, image file bytes).
     static HOST_TEXTURES: Mutex<Vec<(&'static str, Vec<u8>)>> = Mutex::new(Vec::new());
+    /// The overlay that came with the host's last `load`: (layer name, maps).
+    static HOST_OVERLAY: Mutex<Option<(String, Vec<(&'static str, Vec<u8>)>)>> = Mutex::new(None);
+    /// The layers the last host load made: the paint layer and the overlay layer (0: none).
+    static HOST_PAINT_LAYER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static HOST_OVERLAY_LAYER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// A host load is waiting to open; `texturecraft:loaded` goes out once it has.
+    static HOST_LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// Brush mode and overlay opacity the host asked for, applied on the next frame (the last of each wins).
+    static HOST_BRUSH: Mutex<Option<String>> = Mutex::new(None);
+    static HOST_OVERLAY_OPACITY: Mutex<Option<f32>> = Mutex::new(None);
+    const OVERLAY_NAME_MAX: usize = 40;
 
-    /// After the host's mesh opened: its own maps as a UV-projected fill layer under the paint layer. The project then
-    /// counts as unmodified (this is the state the host gave us).
-    pub(super) fn host_apply_textures(app: &mut TextureCraftApp) {
-        let maps = std::mem::take(&mut *HOST_TEXTURES.lock().unwrap_or_else(PoisonError::into_inner));
-        if maps.is_empty() {
-            return;
-        }
-        let ts = app.session.ts();
-        let paint = app.session.selected.get(&ts).copied();
-        let Some(fill) = app.run("layer.add.fill", serde_json::json!({ "name": "Original texture" })).and_then(|v| v.get("layer").and_then(Value::as_u64)) else {
-            return;
-        };
+    /// One of the host's map sets as a UV-projected fill layer. `None` when the layer could not be made.
+    fn host_fill_layer(app: &mut TextureCraftApp, name: &str, prefix: &str, maps: Vec<(&'static str, Vec<u8>)>) -> Option<u64> {
+        let fill = app.run("layer.add.fill", serde_json::json!({ "name": name })).and_then(|v| v.get("layer").and_then(Value::as_u64))?;
         app.run("layer.fill.projection", serde_json::json!({ "layer": fill, "projection": "uv" }));
         for (channel, bytes) in maps {
-            match app.session.import_resource_bytes(&format!("original_{channel}.png"), bytes) {
+            match app.session.import_resource_bytes(&format!("{prefix}_{channel}.png"), bytes) {
                 Ok(image) => {
                     app.run("layer.fill.set", serde_json::json!({ "layer": fill, "channel": channel, "image": image }));
                 }
                 Err(e) => host_post("texturecraft:error", &[("message", format!("{channel} map: {e}").into())]),
             }
         }
-        app.run("layer.move", serde_json::json!({ "layer": fill, "index": 0 }));
+        Some(fill)
+    }
+
+    /// After the host's mesh opened: its own maps as a UV-projected fill layer under the paint layer, and the overlay
+    /// (when the load carried one) as a masked fill layer between the two. The project then counts as unmodified
+    /// (this is the state the host gave us).
+    pub(super) fn host_apply_textures(app: &mut TextureCraftApp) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let maps = std::mem::take(&mut *HOST_TEXTURES.lock().unwrap_or_else(PoisonError::into_inner));
+        let overlay = HOST_OVERLAY.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if !HOST_LOADING.swap(false, Relaxed) {
+            return;
+        }
+        let ts = app.session.ts();
+        let paint = app.session.selected.get(&ts).copied();
+        HOST_PAINT_LAYER.store(paint.map_or(0, |id| id.0), Relaxed);
+        HOST_OVERLAY_LAYER.store(0, Relaxed);
+        let mut bottom = 0;
+        if !maps.is_empty() {
+            if let Some(fill) = host_fill_layer(app, "Original texture", "original", maps) {
+                app.run("layer.move", serde_json::json!({ "layer": fill, "index": 0 }));
+                bottom = 1;
+            }
+        }
+        if let Some((name, maps)) = overlay.filter(|(_, maps)| !maps.is_empty()) {
+            if let Some(fill) = host_fill_layer(app, &name, "overlay", maps) {
+                app.run("layer.move", serde_json::json!({ "layer": fill, "index": bottom }));
+                if app.run("mask.add.white", serde_json::json!({ "layer": fill })).is_some() {
+                    HOST_OVERLAY_LAYER.store(fill, Relaxed);
+                }
+            }
+        }
         if let Some(paint) = paint {
             app.run("layer.select", serde_json::json!({ "layer": paint.0 }));
         }
+        // What the host loaded is the starting point: nothing to undo back past it.
         app.session.modified = false;
+        host_post("texturecraft:loaded", &[("overlay", (HOST_OVERLAY_LAYER.load(Relaxed) != 0).into())]);
+    }
+
+    /// The brush mode the host asked for: where strokes go.
+    fn host_set_brush(app: &mut TextureCraftApp, mode: &str) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (paint, overlay) = (HOST_PAINT_LAYER.load(Relaxed), HOST_OVERLAY_LAYER.load(Relaxed));
+        let modified = app.session.modified;
+        match mode {
+            "paint" if paint != 0 => {
+                app.run("layer.select", serde_json::json!({ "layer": paint, "target": "content" }));
+                app.run("tool.paint", Value::Null);
+            }
+            "hideOverlay" | "showOverlay" if overlay != 0 => {
+                if app.run("layer.select", serde_json::json!({ "layer": overlay, "target": "mask" })).is_some() {
+                    app.run("tool.paint", Value::Null);
+                    app.run("tool.material", serde_json::json!({ "maskValue": if mode == "showOverlay" { 1.0 } else { 0.0 } }));
+                }
+            }
+            _ => {}
+        }
+        // Choosing where to paint changes nothing in the project.
+        app.session.modified = modified;
     }
 
     fn host_origin() -> Option<String> {
@@ -452,9 +517,41 @@ mod web {
                         })
                         .collect();
                     *HOST_TEXTURES.lock().unwrap_or_else(PoisonError::into_inner) = maps;
+                    let overlay = field("overlay");
+                    let overlay_maps: Vec<_> = js_sys::Reflect::get(&overlay, &"textures".into())
+                        .ok()
+                        .map(|textures| {
+                            HOST_CHANNELS
+                                .iter()
+                                .filter_map(|channel| {
+                                    let buffer = js_sys::Reflect::get(&textures, &(*channel).into()).ok()?.dyn_into::<js_sys::ArrayBuffer>().ok()?;
+                                    Some((*channel, js_sys::Uint8Array::new(&buffer).to_vec()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let overlay_name = js_sys::Reflect::get(&overlay, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+                    let overlay_name: String = overlay_name.trim().chars().filter(|c| !c.is_control()).take(OVERLAY_NAME_MAX).collect();
+                    let overlay_name = if overlay_name.is_empty() { "Overlay".to_string() } else { overlay_name };
+                    *HOST_OVERLAY.lock().unwrap_or_else(PoisonError::into_inner) = (!overlay_maps.is_empty()).then_some((overlay_name, overlay_maps));
+                    HOST_LOADING.store(true, Relaxed);
                     INBOX.lock().unwrap_or_else(PoisonError::into_inner).push((name, js_sys::Uint8Array::new(&buffer).to_vec(), Pick::Open));
                 }
                 Some("texturecraft:exportMesh") => HOST_EXPORT.store(true, Relaxed),
+                Some("texturecraft:brush") => {
+                    let Some(mode) = field("mode").as_string().filter(|m| ["paint", "hideOverlay", "showOverlay"].contains(&m.as_str())) else {
+                        host_post("texturecraft:error", &[("message", "brush needs a mode: paint, hideOverlay or showOverlay".into())]);
+                        return;
+                    };
+                    *HOST_BRUSH.lock().unwrap_or_else(PoisonError::into_inner) = Some(mode);
+                }
+                Some("texturecraft:overlay") => {
+                    let Some(opacity) = field("opacity").as_f64().filter(|v| v.is_finite()) else {
+                        host_post("texturecraft:error", &[("message", "overlay needs an opacity from 0 to 1".into())]);
+                        return;
+                    };
+                    *HOST_OVERLAY_OPACITY.lock().unwrap_or_else(PoisonError::into_inner) = Some((opacity as f32).clamp(0.0, 1.0));
+                }
                 _ => return,
             }
             ctx.request_repaint();
@@ -475,6 +572,15 @@ mod web {
                 host_post("texturecraft:ready", &[]);
             }
             _ => {}
+        }
+        if let Some(mode) = HOST_BRUSH.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            host_set_brush(app, &mode);
+        }
+        if let Some(opacity) = HOST_OVERLAY_OPACITY.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            let overlay = HOST_OVERLAY_LAYER.load(Relaxed);
+            if overlay != 0 {
+                app.run("layer.blend", serde_json::json!({ "layer": overlay, "channel": "all", "opacity": opacity }));
+            }
         }
         if HOST_EXPORT.swap(false, Relaxed) {
             let name = format!("{}.glb", sanitize_file_stem(&app.session.doc.project.name));
