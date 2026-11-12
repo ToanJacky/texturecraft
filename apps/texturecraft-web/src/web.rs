@@ -59,6 +59,7 @@ async fn run(canvas: web_sys::HtmlCanvasElement) -> Result<(), String> {
                 app.ui.windows.start = app.ui.prefs.start_window;
                 if embedded() {
                     apply_embed_defaults(&mut app);
+                    texturecraft_ui_egui::web_files::host_bridge_start(&cc.egui_ctx);
                 }
                 if let Some(rs) = &cc.wgpu_render_state {
                     let backend = rs.adapter.get_info().backend;

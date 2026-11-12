@@ -32,6 +32,17 @@ pub const MATERIAL_EXTS: &[&str] = &["tcmat", "mcmat", "mcraft"];
 /// Texture size of a project made from an opened mesh (smaller on the single-threaded web).
 const MESH_RESOLUTION: u32 = if cfg!(target_arch = "wasm32") { 1024 } else { 2048 };
 
+/// Texture size the host page asked for with its next mesh (0: [`MESH_RESOLUTION`]).
+static HOST_RESOLUTION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Texture size of the project made from the next opened mesh.
+fn mesh_resolution() -> u32 {
+    match HOST_RESOLUTION.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => MESH_RESOLUTION,
+        size => size,
+    }
+}
+
 /// What a picked file is for.
 #[derive(Clone, Copy, PartialEq)]
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -140,7 +151,7 @@ pub fn load(app: &mut TextureCraftApp, name: &str, bytes: Vec<u8>) {
         return;
     }
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled");
-    let next = if ext == PROJECT_EXT { Session::from_project_bytes(&bytes) } else { Session::from_mesh_bytes(name, &bytes, MESH_RESOLUTION, stem) };
+    let next = if ext == PROJECT_EXT { Session::from_project_bytes(&bytes) } else { Session::from_mesh_bytes(name, &bytes, mesh_resolution(), stem) };
     match next {
         Ok(next) => {
             app.session.switch_to(next);
@@ -205,8 +216,8 @@ fn zip_files(files: &[ExportedFile]) -> Result<Vec<u8>, String> {
 
 #[cfg(target_arch = "wasm32")]
 pub use web::{
-    download, export_mesh, export_textures, import_bake_mesh, import_environment, import_images, import_material, import_preset, open, save_project,
-    sync_unsaved, unsaved,
+    download, export_mesh, export_textures, host_bridge_start, host_poll, import_bake_mesh, import_environment, import_images, import_material, import_preset,
+    open, save_project, sync_unsaved, unsaved,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -327,6 +338,113 @@ mod web {
         };
         app.session.log.push(format!("Exported {} textures ({name})", files.len()));
         Ok(name)
+    }
+
+    // The host bridge: a page that embeds the app in an `<iframe>` (same origin) loads a mesh into it and asks for the
+    // painted mesh back, through `window.postMessage`. Messages are objects with a `type`:
+    //   host -> app   `texturecraft:load`       { name, bytes: ArrayBuffer, resolution?: 256..=4096 }
+    //   host -> app   `texturecraft:exportMesh` {}
+    //   app  -> host  `texturecraft:ready`      {}                       (once, when the app runs)
+    //   app  -> host  `texturecraft:dirty`      { dirty: bool }          (when unsaved changes appear or go)
+    //   app  -> host  `texturecraft:mesh`       { name, bytes: ArrayBuffer }  (the textured GLB; clears dirty)
+    //   app  -> host  `texturecraft:error`      { message }
+    // Only messages from the parent window at this page's own origin are read; replies go to that origin only.
+
+    /// The host asked for the painted mesh; answered on the next frame.
+    static HOST_EXPORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    /// Whether the bridge runs, and what it last told the host: 0 not started, 1 started, 2 ready sent.
+    static HOST_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    /// The dirty flag the host was last told (2: nothing yet).
+    static HOST_DIRTY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+
+    const HOST_SIZES: [u32; 5] = [256, 512, 1024, 2048, 4096];
+
+    fn host_origin() -> Option<String> {
+        web_sys::window()?.location().origin().ok()
+    }
+
+    /// The parent window, when this page is framed.
+    fn host_window() -> Option<web_sys::Window> {
+        let window = web_sys::window()?;
+        let parent = window.parent().ok()??;
+        (!js_sys::Object::is(&parent, &window)).then_some(parent)
+    }
+
+    fn host_post(kind: &str, fields: &[(&str, wasm_bindgen::JsValue)]) {
+        let (Some(parent), Some(origin)) = (host_window(), host_origin()) else { return };
+        let message = js_sys::Object::new();
+        js_sys::Reflect::set(&message, &"type".into(), &kind.into()).ok();
+        for (key, value) in fields {
+            js_sys::Reflect::set(&message, &(*key).into(), value).ok();
+        }
+        if let Err(e) = parent.post_message(&message, &origin) {
+            log::warn!("couldn't post {kind} to the host page: {e:?}");
+        }
+    }
+
+    /// Listen for the host page's messages (call once, only when the app is embedded).
+    pub fn host_bridge_start(ctx: &egui::Context) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (Some(window), Some(parent), Some(origin)) = (web_sys::window(), host_window(), host_origin()) else { return };
+        if HOST_STATE.swap(1, Relaxed) != 0 {
+            return;
+        }
+        let ctx = ctx.clone();
+        let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            if event.origin() != origin || !event.source().is_some_and(|source| js_sys::Object::is(&source, &parent)) {
+                return;
+            }
+            let data = event.data();
+            let field = |key: &str| js_sys::Reflect::get(&data, &key.into()).unwrap_or(wasm_bindgen::JsValue::UNDEFINED);
+            match field("type").as_string().as_deref() {
+                Some("texturecraft:load") => {
+                    let (Some(name), Ok(buffer)) = (field("name").as_string(), field("bytes").dyn_into::<js_sys::ArrayBuffer>()) else {
+                        host_post("texturecraft:error", &[("message", "load needs a name and an ArrayBuffer of bytes".into())]);
+                        return;
+                    };
+                    // Only the file name: the host's string never becomes a path.
+                    let name = name.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+                    let size = field("resolution").as_f64().map(|v| v as u32).filter(|v| HOST_SIZES.contains(v)).unwrap_or(0);
+                    HOST_RESOLUTION.store(size, Relaxed);
+                    INBOX.lock().unwrap_or_else(PoisonError::into_inner).push((name, js_sys::Uint8Array::new(&buffer).to_vec(), Pick::Open));
+                }
+                Some("texturecraft:exportMesh") => HOST_EXPORT.store(true, Relaxed),
+                _ => return,
+            }
+            ctx.request_repaint();
+        });
+        if window.add_event_listener_with_callback("message", listener.as_ref().unchecked_ref()).is_ok() {
+            listener.forget(); // lives as long as the page
+        }
+    }
+
+    /// The bridge's per-frame half: tell the host the app is ready and whether it has unsaved changes, and answer a
+    /// pending export. Does nothing until [`host_bridge_start`] ran.
+    pub fn host_poll(app: &mut TextureCraftApp) {
+        use std::sync::atomic::Ordering::Relaxed;
+        match HOST_STATE.load(Relaxed) {
+            0 => return,
+            1 => {
+                HOST_STATE.store(2, Relaxed);
+                host_post("texturecraft:ready", &[]);
+            }
+            _ => {}
+        }
+        if HOST_EXPORT.swap(false, Relaxed) {
+            let name = format!("{}.glb", sanitize_file_stem(&app.session.doc.project.name));
+            match app.session.mesh_glb_bytes() {
+                Ok(bytes) => {
+                    app.session.modified = false;
+                    app.session.log.push(format!("Sent {name} to the host page"));
+                    host_post("texturecraft:mesh", &[("name", name.as_str().into()), ("bytes", js_sys::Uint8Array::from(bytes.as_slice()).buffer().into())]);
+                }
+                Err(e) => host_post("texturecraft:error", &[("message", e.to_string().into())]),
+            }
+        }
+        let dirty = u8::from(app.session.modified);
+        if HOST_DIRTY.swap(dirty, Relaxed) != dirty {
+            host_post("texturecraft:dirty", &[("dirty", (dirty == 1).into())]);
+        }
     }
 
     /// Start a browser download of `bytes` named `name` (Blob + a temporary `<a download>`).

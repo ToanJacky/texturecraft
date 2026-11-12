@@ -690,6 +690,7 @@ impl eframe::App for TextureCraftApp {
         {
             keymap::sync_captured(&self.ui.keymap);
             web_files::sync_unsaved(self);
+            web_files::host_poll(self);
         }
         self.fonts.update(ctx, i18n::current().code, self.ui.windows.settings);
         #[cfg(not(target_arch = "wasm32"))]
